@@ -7,10 +7,10 @@ import asyncio
 import logging
 import signal
 import sys
+import subprocess
 import yaml
 from pathlib import Path
 from typing import Optional, Dict, Any
-from src.collector import TidePoolCollector
 
 logger = logging.getLogger(__name__)
 
@@ -83,25 +83,39 @@ class TidePoolRunner:
         self.markets = config.get('markets', [])
         self.restart_delay = config.get('restart_delay', 5)
         self.log_level = config.get('log_level', 'INFO')
-        self.collector: Optional[TidePoolCollector] = None
+        self.collector_process = None
         self.should_restart = True
         
     async def run_collector(self):
-        """Run a single instance of the collector"""
+        """Run the collector as a subprocess"""
         try:
             logger.info("Starting TidePool Collector...")
-            self.collector = TidePoolCollector(self.markets)
-            await self.collector.run()
+            # Run the collector as a subprocess
+            self.collector_process = subprocess.Popen(
+                [sys.executable, '-m', 'src.collector'] + self.markets,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            # Wait for the process to complete
+            stdout, stderr = self.collector_process.communicate()
+            
+            if stdout:
+                logger.info(f"Collector output: {stdout}")
+            if stderr:
+                logger.error(f"Collector error: {stderr}")
+                
+            exit_code = self.collector_process.returncode
+            logger.info(f"Collector exited with code {exit_code}")
+            
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt, shutting down...")
             self.should_restart = False
+            if self.collector_process:
+                self.collector_process.terminate()
         except Exception as e:
-            logger.error(f"Collector crashed with error: {e}")
-            logger.exception("Full traceback:")
-        finally:
-            if self.collector:
-                # Add any cleanup code here if needed
-                pass
+            logger.error(f"Error running collector: {e}")
     
     async def run_with_restart(self):
         """Run the collector with automatic restart on failure"""
@@ -121,6 +135,9 @@ class TidePoolRunner:
     def stop(self):
         """Stop the runner (called by signal handler)"""
         logger.info("Stop signal received")
+        self.should_restart = False
+        if self.collector_process:
+            self.collector_process.terminate()
         sys.exit(0)
 
 # Global runner instance for signal handling

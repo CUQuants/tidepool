@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tidepool"
-version = "0.1.0"
+version = "0.1.1"
 description = "Real-time orderbook and trade data collector for the TidePool dataset"
 readme = "README.md"
 license = {text = "MIT"}
