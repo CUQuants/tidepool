@@ -20,21 +20,19 @@ from datetime import datetime, timezone, timedelta
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 PAIRS = [
-    "XBTUSD",
-    "SOLUSD",
-    "PAXGUSD",
-    "EURQUSD",
-    "EURRUSD",
-    "EURQEUR",
-    "EURREUR",
-    "PYUSDEUR",
-    "USDSUSD",
+    "MOODENGUSD",
+    "AVAXUSD",
+    "DOTUSD",
+    "ARBUSD",
+    "OPUSD",
+    "APTUSD",
+    "SUIUSD"
 ]
 
 OUTPUT_DIR     = "./data"
-DAYS_BACK      = 365
+DAYS_BACK      = 30
 REQUEST_DELAY  = 1.2
-MAX_FILE_BYTES = 100 * 1024 * 1024  # 100 MB
+MAX_FILE_BYTES = 40 * 1024 * 1024  # 40 MB
 
 # ── Kraken API ────────────────────────────────────────────────────────────────
 
