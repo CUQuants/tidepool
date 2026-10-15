@@ -19,17 +19,29 @@ logger = logging.getLogger(__name__)
 
 BOOK_DEPTH = 25
 
-_book_fields = [
-    pa.field("ts", pa.int64(), nullable=False),
-    pa.field("recv_ts", pa.int64(), nullable=False),
+_ORDER_FIELDS = [
+    pa.field("ts", pa.int64(), nullable=False),        # exchange timestamp
+    pa.field("recv_ts", pa.int64(), nullable=False),   # our receive time
+    pa.field("seq", pa.int64(), nullable=False),       # per-process message counter; restarts begin with a snapshot
     pa.field("symbol", pa.string(), nullable=False),
 ]
-for _i in range(1, BOOK_DEPTH + 1):
-    _book_fields += [pa.field(f"bid_{_i}_price", pa.float64()), pa.field(f"bid_{_i}_qty", pa.float64())]
-for _i in range(1, BOOK_DEPTH + 1):
-    _book_fields += [pa.field(f"ask_{_i}_price", pa.float64()), pa.field(f"ask_{_i}_qty", pa.float64())]
 
-BOOK_SCHEMA = pa.schema(_book_fields)
+# One row per changed price level, exactly as Kraken sent it. qty == 0 removes the level.
+BOOK_DELTA_SCHEMA = pa.schema(_ORDER_FIELDS + [
+    pa.field("side", pa.string(), nullable=False),     # "bid" or "ask"
+    pa.field("price", pa.float64(), nullable=False),
+    pa.field("qty", pa.float64(), nullable=False),
+    pa.field("checksum", pa.int64()),                  # Kraken CRC32 of the top 10 levels after this message
+])
+
+# Full top-BOOK_DEPTH book from each Kraken snapshot (startup and every periodic resync).
+_snapshot_fields = _ORDER_FIELDS + [pa.field("checksum", pa.int64())]
+for _i in range(1, BOOK_DEPTH + 1):
+    _snapshot_fields += [pa.field(f"bid_{_i}_price", pa.float64()), pa.field(f"bid_{_i}_qty", pa.float64())]
+for _i in range(1, BOOK_DEPTH + 1):
+    _snapshot_fields += [pa.field(f"ask_{_i}_price", pa.float64()), pa.field(f"ask_{_i}_qty", pa.float64())]
+
+BOOK_SNAPSHOT_SCHEMA = pa.schema(_snapshot_fields)
 
 TRADE_SCHEMA = pa.schema([
     pa.field("ts", pa.int64(), nullable=False),
@@ -42,12 +54,19 @@ TRADE_SCHEMA = pa.schema([
     pa.field("trade_id", pa.int64()),
 ])
 
-SCHEMAS = {"book": BOOK_SCHEMA, "trade": TRADE_SCHEMA}
+SCHEMAS = {"book_delta": BOOK_DELTA_SCHEMA, "book_snapshot": BOOK_SNAPSHOT_SCHEMA, "trade": TRADE_SCHEMA}
+
+# Book rows must replay in arrival order, so they sort by seq; equal exchange timestamps can't order them.
+SORT_KEYS = {
+    "book_delta": [("symbol", "ascending"), ("seq", "ascending")],
+    "book_snapshot": [("symbol", "ascending"), ("seq", "ascending")],
+    "trade": [("symbol", "ascending"), ("ts", "ascending")],
+}
 
 # Low-cardinality string columns get dictionary encoding; timestamps get delta encoding.
 # The two sets must not overlap or pyarrow rejects the column_encoding.
 _DICT_COLUMNS = {"symbol", "side", "ord_type"}
-_DELTA_COLUMNS = {"ts": "DELTA_BINARY_PACKED", "recv_ts": "DELTA_BINARY_PACKED"}
+_DELTA_COLUMNS = {"ts": "DELTA_BINARY_PACKED", "recv_ts": "DELTA_BINARY_PACKED", "seq": "DELTA_BINARY_PACKED"}
 
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 _ONE_US = datetime.timedelta(microseconds=1)
@@ -146,7 +165,7 @@ class HotParquetWriter:
         try:
             schema = SCHEMAS[stream]
             table = pa.Table.from_pydict(columns, schema=schema)
-            table = table.sort_by([("symbol", "ascending"), ("ts", "ascending")])
+            table = table.sort_by(SORT_KEYS[stream])
 
             ts = columns["ts"]
             start_ns, end_ns = min(ts), max(ts)
@@ -164,7 +183,7 @@ class HotParquetWriter:
                 tmp,
                 compression=self.compression,
                 use_dictionary=[c for c in schema.names if c in _DICT_COLUMNS],
-                column_encoding=_DELTA_COLUMNS,
+                column_encoding={c: e for c, e in _DELTA_COLUMNS.items() if c in schema.names},
                 write_statistics=True,
             )
             os.replace(tmp, final)
