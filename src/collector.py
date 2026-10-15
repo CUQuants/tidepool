@@ -6,6 +6,7 @@ Maintains full orderbook state and applies incremental updates.
 from kraken_api.kraken_ws import KrakenWebSocket
 from src.storage.hot_writer import BOOK_DEPTH, HotParquetWriter, parse_ts_ns
 import asyncio
+import datetime
 import json
 import logging
 import sys
@@ -44,11 +45,6 @@ class TidePoolCollector:
         self.dropped_rows = 0
         self._last_drop_log = 0.0
         
-        # Every resync re-requests the full book in case updates were missed
-        self.snapshot_interval_s = storage_cfg.get('snapshot_interval_seconds', 300)
-        # Incremented per websocket data message; orders book rows for replay
-        self.seq = 0
-        
         # Set up the message handler
         self.client.on_message = self.handle_message
     
@@ -57,7 +53,6 @@ class TidePoolCollector:
         Handle incoming WebSocket messages
         """
         try:
-            recv_ts = time.time_ns()
             if isinstance(message, str):
                 data = json.loads(message)
             else:
@@ -65,12 +60,11 @@ class TidePoolCollector:
                 
             # Handle the new message format
             if isinstance(data, dict) and 'channel' in data and 'type' in data and 'data' in data:
-                self.seq += 1
                 if data['type'] == 'snapshot':
-                    # Full orderbook snapshot (on subscribe and every periodic resync)
-                    await self.process_snapshot_message(data, recv_ts)
+                    # Initial full orderbook snapshot
+                    await self.process_snapshot_message(data)
                 elif data['type'] == 'update':
-                    await self.process_update_message(data, recv_ts)
+                    await self.process_update_message(data)
             elif isinstance(data, dict) and 'event' in data:
                 # Handle other message types (heartbeat, status, etc.)
                 print(f"Event: {data['event']}")
@@ -78,9 +72,9 @@ class TidePoolCollector:
         except Exception as e:
             print(f"Error handling message: {e}")
     
-    async def process_snapshot_message(self, message: dict, recv_ts: int):
+    async def process_snapshot_message(self, message: dict):
         """
-        Process snapshot messages: replace the book state and store the full book
+        Process initial snapshot messages to build full orderbook state
         """
         try:
             channel = message['channel']
@@ -89,8 +83,9 @@ class TidePoolCollector:
             if channel == 'book':
                 for item in message_data:
                     symbol = item.get('symbol', '')
+                    timestamp = item.get('timestamp', datetime.datetime.utcnow().isoformat() + 'Z')
                     
-                    # A snapshot replaces whatever we had, including state drifted by missed updates
+                    # Initialize orderbook for this symbol
                     self.orderbooks[symbol] = {'bids': {}, 'asks': {}}
                     
                     # Process bids
@@ -108,12 +103,12 @@ class TidePoolCollector:
                     print(f"Initialized orderbook for {symbol} with {len(self.orderbooks[symbol]['bids'])} bids and {len(self.orderbooks[symbol]['asks'])} asks")
                     
                     # Save the full orderbook snapshot
-                    self.enqueue_orderbook_snapshot(symbol, item, recv_ts)
+                    await self.enqueue_orderbook_snapshot(symbol, timestamp)
                     
         except Exception as e:
             print(f"Error processing snapshot message: {e}")
     
-    async def process_update_message(self, message: dict, recv_ts: int):
+    async def process_update_message(self, message: dict):
         """
         Process update messages and apply changes to orderbook state
         """
@@ -124,18 +119,19 @@ class TidePoolCollector:
             # Process each item in the data array
             for item in message_data:
                 symbol = item.get('symbol', '')
+                timestamp = item.get('timestamp', datetime.datetime.utcnow().isoformat() + 'Z')
                 
                 if channel == 'book':
-                    self.update_orderbook(symbol, item, recv_ts)
+                    await self.update_orderbook(symbol, item, timestamp)
                 elif channel == 'trade':
-                    await self.enqueue_trade(symbol, item, recv_ts)
+                    await self.enqueue_trade(symbol, item, timestamp)
                     
         except Exception as e:
             print(f"Error processing update message: {e}")
     
-    def update_orderbook(self, symbol: str, orderbook_item: dict, recv_ts: int):
+    async def update_orderbook(self, symbol: str, orderbook_item: dict, timestamp: str):
         """
-        Apply incremental changes to the orderbook state and store each change as a delta row
+        Update orderbook state with incremental changes and save current state
         """
         try:
             # Ensure we have an orderbook for this symbol
@@ -143,39 +139,35 @@ class TidePoolCollector:
                 self.orderbooks[symbol] = {'bids': {}, 'asks': {}}
                 print(f"Warning: No snapshot received for {symbol}, initializing empty orderbook")
             
-            ts = self._exchange_ts(orderbook_item, recv_ts)
-            base = {'ts': ts, 'recv_ts': recv_ts, 'seq': self.seq, 'symbol': symbol,
-                    'checksum': orderbook_item.get('checksum')}
+            # Process bid updates
+            for bid in orderbook_item.get('bids', []):
+                price = float(bid['price'])
+                qty = float(bid['qty'])
+                
+                if qty == 0:
+                    # Remove this price level
+                    self.orderbooks[symbol]['bids'].pop(price, None)
+                else:
+                    # Update/add this price level
+                    self.orderbooks[symbol]['bids'][price] = qty
             
-            for side, key in (('bid', 'bids'), ('ask', 'asks')):
-                levels = self.orderbooks[symbol][key]
-                for level in orderbook_item.get(key, []):
-                    price = float(level['price'])
-                    qty = float(level['qty'])
-                    
-                    if qty == 0:
-                        # Remove this price level
-                        levels.pop(price, None)
-                    else:
-                        # Update/add this price level
-                        levels[price] = qty
-                    
-                    self._enqueue('book_delta', {**base, 'side': side, 'price': price, 'qty': qty})
+            # Process ask updates
+            for ask in orderbook_item.get('asks', []):
+                price = float(ask['price'])
+                qty = float(ask['qty'])
+                
+                if qty == 0:
+                    # Remove this price level
+                    self.orderbooks[symbol]['asks'].pop(price, None)
+                else:
+                    # Update/add this price level
+                    self.orderbooks[symbol]['asks'][price] = qty
             
-            # Kraken never sends qty 0 for levels pushed past the subscribed depth, so trim them here
-            self._truncate(self.orderbooks[symbol])
+            # Save the updated orderbook state
+            await self.enqueue_orderbook_snapshot(symbol, timestamp)
             
         except Exception as e:
             print(f"Error updating orderbook for {symbol}: {e}")
-    
-    @staticmethod
-    def _truncate(orderbook: Dict[str, Dict[float, float]]):
-        """Drop levels beyond BOOK_DEPTH on each side."""
-        for key, reverse in (('bids', True), ('asks', False)):
-            levels = orderbook[key]
-            if len(levels) > BOOK_DEPTH:
-                for price in sorted(levels, reverse=reverse)[BOOK_DEPTH:]:
-                    del levels[price]
     
     def _enqueue(self, stream: str, row: dict):
         """
@@ -191,19 +183,15 @@ class TidePoolCollector:
                 logger.warning(f"Write queue full, dropped {self.dropped_rows} rows so far")
                 self._last_drop_log = now
 
-    def _exchange_ts(self, item: dict, recv_ts: int) -> int:
-        """
-        Kraken's timestamp for this item in ns. Kraken sends one on every book and trade
-        message, so a missing or unparseable one is logged and replaced with recv_ts.
-        """
+    def _row_times(self, timestamp: str) -> tuple:
+        """Return (ts, recv_ts) in ns, falling back to receive time if the exchange timestamp is bad."""
+        recv_ts = time.time_ns()
         try:
-            return parse_ts_ns(item['timestamp'])
-        except (KeyError, TypeError, ValueError):
-            logger.warning(f"Missing/bad exchange timestamp {item.get('timestamp')!r} for "
-                           f"{item.get('symbol')}, using receive time")
-            return recv_ts
+            return parse_ts_ns(timestamp), recv_ts
+        except (TypeError, ValueError):
+            return recv_ts, recv_ts
 
-    def enqueue_orderbook_snapshot(self, symbol: str, item: dict, recv_ts: int):
+    async def enqueue_orderbook_snapshot(self, symbol: str, timestamp: str):
         """
         Enqueue current top 25 bids and asks as a single row
         """
@@ -217,8 +205,8 @@ class TidePoolCollector:
             top_bids = sorted(orderbook['bids'].keys(), reverse=True)[:BOOK_DEPTH]
             top_asks = sorted(orderbook['asks'].keys())[:BOOK_DEPTH]
 
-            row = {'ts': self._exchange_ts(item, recv_ts), 'recv_ts': recv_ts, 'seq': self.seq,
-                   'symbol': symbol, 'checksum': item.get('checksum')}
+            ts, recv_ts = self._row_times(timestamp)
+            row = {'ts': ts, 'recv_ts': recv_ts, 'symbol': symbol}
 
             # Level 1 is the best price; missing levels stay null
             for i, price in enumerate(top_bids, start=1):
@@ -228,17 +216,17 @@ class TidePoolCollector:
                 row[f'ask_{i}_price'] = price
                 row[f'ask_{i}_qty'] = orderbook['asks'][price]
 
-            self._enqueue('book_snapshot', row)
+            self._enqueue('book', row)
 
         except Exception as e:
             logger.error(f"Error enqueuing orderbook snapshot for {symbol}: {e}")
 
-    async def enqueue_trade(self, symbol: str, trade_item: dict, recv_ts: int):
+    async def enqueue_trade(self, symbol: str, trade_item: dict, timestamp: str):
         """
         Enqueue a trade row
         """
         try:
-            ts = self._exchange_ts(trade_item, recv_ts)
+            ts, recv_ts = self._row_times(timestamp)
             price = trade_item.get('price')
             qty = trade_item.get('qty')
             trade_id = trade_item.get('trade_id')
@@ -257,24 +245,6 @@ class TidePoolCollector:
         except Exception as e:
             logger.error(f"Error enqueuing trade for {symbol}: {e}")
 
-    async def resync_books(self):
-        """
-        Every snapshot_interval_s, resubscribe to the book so Kraken sends a fresh snapshot.
-        Kraken v2 has no way to request a snapshot on a live subscription, so this
-        unsubscribes and resubscribes. The snapshot replaces the in-memory book and is stored.
-        """
-        if not self.snapshot_interval_s or self.snapshot_interval_s <= 0:
-            return
-        while True:
-            await asyncio.sleep(self.snapshot_interval_s)
-            try:
-                logger.info("Resyncing order books from a fresh snapshot")
-                await self.client.unsubscribe_book(self.markets)
-                # No handler: handle_message is already registered for 'book'
-                await self.client.subscribe_book(self.markets, depth=BOOK_DEPTH)
-            except Exception as e:
-                logger.error(f"Order book resync failed: {e}")
-
     async def run(self) -> None:
         """
         Run the TidePool Collector
@@ -284,13 +254,9 @@ class TidePoolCollector:
             # Connect to WebSocket
             await self.client.connect()
            
-            await self.client.subscribe_book(self.markets, depth=BOOK_DEPTH, handler=self.handle_message)
+            await self.client.subscribe_book(self.markets, depth=25, handler=self.handle_message)
             await self.client.subscribe_trades(self.markets, handler=self.handle_message)
-            resync = asyncio.create_task(self.resync_books())
-            try:
-                await self.client.run()
-            finally:
-                resync.cancel()
+            await self.client.run()
             await self.client.close()
            
         except Exception as e:
