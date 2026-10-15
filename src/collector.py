@@ -4,14 +4,16 @@ Real-time orderbook and trade data collector for the TidePool dataset.
 Maintains full orderbook state and applies incremental updates.
 """
 from kraken_api.kraken_ws import KrakenWebSocket
+from src.storage.hot_writer import BOOK_DEPTH, HotParquetWriter, parse_ts_ns
 import asyncio
 import datetime
-import os
-import csv
 import json
+import logging
 import sys
-from typing import Dict, List
-from decimal import Decimal
+import time
+from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 class TidePoolCollector:
     """
@@ -19,10 +21,11 @@ class TidePoolCollector:
     Real-time orderbook and trade data collector for the TidePool dataset.
     Maintains full orderbook state in memory.
     """
-    def __init__(self, markets: list[str]):
+    def __init__(self, markets: list[str], storage_cfg: Optional[Dict[str, Any]] = None):
         """
         Initialize the TidePool Collector
         """
+        storage_cfg = storage_cfg or {}
         self.markets = markets
         self.client = KrakenWebSocket()
         
@@ -30,8 +33,17 @@ class TidePoolCollector:
         # Format: {symbol: {'bids': {price: qty}, 'asks': {price: qty}}}
         self.orderbooks: Dict[str, Dict[str, Dict[float, float]]] = {}
         
-        # Ensure base directory structure exists
-        os.makedirs("data", exist_ok=True)
+        # Rows go websocket handler -> queue -> hot-tier Parquet writer task
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=storage_cfg.get('queue_maxsize', 200_000))
+        self.writer = HotParquetWriter(
+            self.queue,
+            base_dir=storage_cfg.get('hot_dir', 'data/hot'),
+            roll_interval_s=storage_cfg.get('roll_interval_seconds', 60),
+            max_rows=storage_cfg.get('max_rows_per_file', 500_000),
+            compression=storage_cfg.get('compression', 'lz4'),
+        )
+        self.dropped_rows = 0
+        self._last_drop_log = 0.0
         
         # Set up the message handler
         self.client.on_message = self.handle_message
@@ -91,7 +103,7 @@ class TidePoolCollector:
                     print(f"Initialized orderbook for {symbol} with {len(self.orderbooks[symbol]['bids'])} bids and {len(self.orderbooks[symbol]['asks'])} asks")
                     
                     # Save the full orderbook snapshot
-                    await self.save_orderbook_snapshot(symbol, timestamp)
+                    await self.enqueue_orderbook_snapshot(symbol, timestamp)
                     
         except Exception as e:
             print(f"Error processing snapshot message: {e}")
@@ -112,7 +124,7 @@ class TidePoolCollector:
                 if channel == 'book':
                     await self.update_orderbook(symbol, item, timestamp)
                 elif channel == 'trade':
-                    await self.save_trade_data(symbol, item, timestamp)
+                    await self.enqueue_trade(symbol, item, timestamp)
                     
         except Exception as e:
             print(f"Error processing update message: {e}")
@@ -152,142 +164,92 @@ class TidePoolCollector:
                     self.orderbooks[symbol]['asks'][price] = qty
             
             # Save the updated orderbook state
-            await self.save_orderbook_snapshot(symbol, timestamp)
+            await self.enqueue_orderbook_snapshot(symbol, timestamp)
             
         except Exception as e:
             print(f"Error updating orderbook for {symbol}: {e}")
     
-    def get_file_path(self, symbol: str, data_type: str, timestamp: str) -> str:
+    def _enqueue(self, stream: str, row: dict):
         """
-        Generate file path based on symbol, data type, and timestamp
+        Hand a row to the Parquet writer without blocking the websocket loop.
+        Drops the row if the queue is full (writer can't keep up).
         """
-        # Convert symbol from TUSD/EUR format to TUSD_EUR
-        clean_symbol = symbol.replace('/', '_')
-        
-        # Extract date from timestamp (format: 2025-09-01T20:11:35.911390Z)
         try:
-            dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-            date_str = dt.strftime("%Y-%m-%d")
-        except:
-            # Fallback to current date if timestamp parsing fails
-            date_str = datetime.datetime.utcnow().strftime("%Y-%m-%d")
-        
-        # Create directory structure: data/SYMBOL/TYPE/
-        directory = f"data/{clean_symbol}/{data_type}"
-        os.makedirs(directory, exist_ok=True)
-        
-        # Return full file path
-        return f"{directory}/{date_str}.csv"
-    
-    async def save_orderbook_snapshot(self, symbol: str, timestamp: str):
+            self.queue.put_nowait((stream, row))
+        except asyncio.QueueFull:
+            self.dropped_rows += 1
+            now = time.monotonic()
+            if now - self._last_drop_log >= 10:
+                logger.warning(f"Write queue full, dropped {self.dropped_rows} rows so far")
+                self._last_drop_log = now
+
+    def _row_times(self, timestamp: str) -> tuple:
+        """Return (ts, recv_ts) in ns, falling back to receive time if the exchange timestamp is bad."""
+        recv_ts = time.time_ns()
+        try:
+            return parse_ts_ns(timestamp), recv_ts
+        except (TypeError, ValueError):
+            return recv_ts, recv_ts
+
+    async def enqueue_orderbook_snapshot(self, symbol: str, timestamp: str):
         """
-        Save current top 25 bids and asks as a single row to CSV
+        Enqueue current top 25 bids and asks as a single row
         """
         try:
             if symbol not in self.orderbooks:
                 return
-                
-            filename = self.get_file_path(symbol, 'orderbook', timestamp)
-            
-            # Create file with headers if it doesn't exist
-            file_exists = os.path.exists(filename)
-            if not file_exists:
-                with open(filename, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    # Create headers for 25 bid levels and 25 ask levels
-                    headers = ['timestamp']
-                    
-                    # Add bid headers (25th best to 1st best - furthest to closest)
-                    for i in range(25, 0, -1):
-                        headers.extend([f'bid_{i}_price', f'bid_{i}_qty'])
-                    
-                    # Add ask headers (1st best to 25th best - closest to furthest)
-                    for i in range(1, 26):
-                        headers.extend([f'ask_{i}_price', f'ask_{i}_qty'])
-                    
-                    writer.writerow(headers)
-            
+
             orderbook = self.orderbooks[symbol]
-            
+
             # Get top 25 bids (highest prices first) and top 25 asks (lowest prices first)
-            top_bids = sorted(orderbook['bids'].keys(), reverse=True)[:25]
-            top_asks = sorted(orderbook['asks'].keys())[:25]
-            
-            # Build the row data
-            row_data = [timestamp]
-            
-            # Add bid data (25th best to 1st best)
-            for i in range(24, -1, -1):  # 24 down to 0 (reverse order)
-                if i < len(top_bids):
-                    price = top_bids[i]
-                    qty = orderbook['bids'][price]
-                    row_data.extend([price, qty])
-                else:
-                    # No data available for this level
-                    row_data.extend([None, None])
-            
-            # Add ask data (1st best to 25th best)
-            for i in range(25):
-                if i < len(top_asks):
-                    price = top_asks[i]
-                    qty = orderbook['asks'][price]
-                    row_data.extend([price, qty])
-                else:
-                    # No data available for this level
-                    row_data.extend([None, None])
-            
-            # Save the complete orderbook state as one row
-            with open(filename, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(row_data)
-                
-            print(f"Saved orderbook snapshot for {symbol}: {len(top_bids)} bids, {len(top_asks)} asks")
-            
+            top_bids = sorted(orderbook['bids'].keys(), reverse=True)[:BOOK_DEPTH]
+            top_asks = sorted(orderbook['asks'].keys())[:BOOK_DEPTH]
+
+            ts, recv_ts = self._row_times(timestamp)
+            row = {'ts': ts, 'recv_ts': recv_ts, 'symbol': symbol}
+
+            # Level 1 is the best price; missing levels stay null
+            for i, price in enumerate(top_bids, start=1):
+                row[f'bid_{i}_price'] = price
+                row[f'bid_{i}_qty'] = orderbook['bids'][price]
+            for i, price in enumerate(top_asks, start=1):
+                row[f'ask_{i}_price'] = price
+                row[f'ask_{i}_qty'] = orderbook['asks'][price]
+
+            self._enqueue('book', row)
+
         except Exception as e:
-            print(f"Error saving orderbook snapshot for {symbol}: {e}")
-    
-    async def save_trade_data(self, symbol: str, trade_item: dict, timestamp: str):
+            logger.error(f"Error enqueuing orderbook snapshot for {symbol}: {e}")
+
+    async def enqueue_trade(self, symbol: str, trade_item: dict, timestamp: str):
         """
-        Save trade data to CSV
+        Enqueue a trade row
         """
         try:
-            filename = self.get_file_path(symbol, 'trade', timestamp)
-            
-            # Create file with headers if it doesn't exist
-            file_exists = os.path.exists(filename)
-            if not file_exists:
-                with open(filename, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['timestamp', 'side', 'price', 'qty', 'ord_type', 'trade_id'])
-            
-            # Extract trade data
-            side = trade_item.get('side', '')
-            price = trade_item.get('price', '')
-            qty = trade_item.get('qty', '')
-            ord_type = trade_item.get('ord_type', '')
-            trade_id = trade_item.get('trade_id', '')
-            
-            # Append data to file
-            with open(filename, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    timestamp,
-                    side,
-                    price,
-                    qty,
-                    ord_type,
-                    trade_id
-                ])
-                
-            print(f"Saved trade data for {symbol}: {side} {qty} @ {price}")
-            
+            ts, recv_ts = self._row_times(timestamp)
+            price = trade_item.get('price')
+            qty = trade_item.get('qty')
+            trade_id = trade_item.get('trade_id')
+
+            self._enqueue('trade', {
+                'ts': ts,
+                'recv_ts': recv_ts,
+                'symbol': symbol,
+                'side': trade_item.get('side'),
+                'price': float(price) if price is not None else None,
+                'qty': float(qty) if qty is not None else None,
+                'ord_type': trade_item.get('ord_type'),
+                'trade_id': int(trade_id) if trade_id is not None else None,
+            })
+
         except Exception as e:
-            print(f"Error saving trade data for {symbol}: {e}")
-    
+            logger.error(f"Error enqueuing trade for {symbol}: {e}")
+
     async def run(self) -> None:
         """
         Run the TidePool Collector
         """
+        self.writer.start()
         try:
             # Connect to WebSocket
             await self.client.connect()
@@ -300,3 +262,6 @@ class TidePoolCollector:
         except Exception as e:
             print(f"Error in run method: {e}")
             sys.exit(1)
+        finally:
+            # Flush buffered rows on every exit path, including the sys.exit calls in KrakenWebSocket
+            await self.writer.stop()

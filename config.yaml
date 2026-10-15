@@ -30,11 +30,13 @@ logging:
   file: tidepool.log
   format: "%(asctime)s - %(levelname)s - %(message)s"
 
-# Data storage configuration
-data:
-  output_directory: data/markets/orderbook
-  file_rotation: 24h  # Create new file every 24 hours
-  max_rows_per_file: 1000  # Maximum rows per CSV file (if implementing rotation)
+# Data storage configuration (see docs/parquet-storage-spec.md)
+storage:
+  hot_dir: data/hot              # hot tier: data/hot/{book,trade}/ts_<start_ns>_<end_ns>.parquet
+  roll_interval_seconds: 60      # close a hot file every N seconds
+  max_rows_per_file: 500000      # also roll early if a buffer reaches this many rows
+  compression: lz4               # light codec for the hot tier
+  queue_maxsize: 200000          # rows buffered between websocket and writer before dropping
 
 # Kraken WebSocket configuration (optional)
 kraken:
@@ -42,11 +44,6 @@ kraken:
   reconnect_interval: 30  # seconds
   heartbeat_timeout: 60   # seconds
 
-# Performance settings
-performance:
-  buffer_size: 1000      # Internal buffer size for data
-  flush_interval: 5      # seconds between file flushes
-  
 # Monitoring (future feature)
 monitoring:
   enabled: false

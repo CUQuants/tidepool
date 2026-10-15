@@ -3,3 +3,4 @@ pyaml
 logging
 websockets
 aiohttp
+pyarrow
