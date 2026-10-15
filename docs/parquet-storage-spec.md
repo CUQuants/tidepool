@@ -22,6 +22,17 @@ data/
 - Write to a temp name, then atomically rename to the final name. The loader must never see a half-written file.
 - Keep the hot window at 24h even though only 10h is needed at startup. This gives slack if compaction lags or the collector was down.
 
+## Order book streams
+
+The collector writes three hot-tier streams: `book_delta`, `book_snapshot` and `trade`.
+
+- `book_delta`: one row per changed price level, as Kraken sent it (`side`, `price`, `qty`; `qty == 0` removes the level).
+- `book_snapshot`: one wide row (top 25 bids and asks) per Kraken snapshot. Snapshots arrive on subscribe and on every resync. Each resync unsubscribes and resubscribes the book channel every `storage.snapshot_interval_seconds` (default 300), because Kraken v2 cannot send a snapshot on a live subscription. The resync recovers from missed updates.
+- Every row has `ts` (Kraken's exchange timestamp, ns) and `recv_ts` (our receive time, ns). If Kraken omits the timestamp, `ts` falls back to `recv_ts` and a warning is logged.
+- `seq` is a per-process message counter. Book rows are sorted by `(symbol, seq)` so they replay in arrival order. `seq` restarts at 0 when the collector restarts, but a restart always begins with a snapshot.
+- `checksum` is Kraken's CRC32 of the top 10 levels after that message. It is stored for offline verification and is not checked live.
+- To replay the book: take the latest `book_snapshot` row for the symbol, then apply `book_delta` rows with a greater `seq` (within the same collector run). Trim each side to 25 levels after each message, since Kraken does not send removals for levels pushed past the subscribed depth.
+
 ## Cold tier
 
 - A compaction job merges hot files older than about 24h into one sorted daily file.

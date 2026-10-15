@@ -32,11 +32,12 @@ logging:
 
 # Data storage configuration (see docs/parquet-storage-spec.md)
 storage:
-  hot_dir: data/hot              # hot tier: data/hot/{book,trade}/ts_<start_ns>_<end_ns>.parquet
+  hot_dir: data/hot              # hot tier: data/hot/{book_delta,book_snapshot,trade}/ts_<start_ns>_<end_ns>.parquet
   roll_interval_seconds: 60      # close a hot file every N seconds
   max_rows_per_file: 500000      # also roll early if a buffer reaches this many rows
   compression: lz4               # light codec for the hot tier
   queue_maxsize: 200000          # rows buffered between websocket and writer before dropping
+  snapshot_interval_seconds: 300 # resubscribe for a fresh book snapshot every N seconds (0 disables)
 
 # Kraken WebSocket configuration (optional)
 kraken:

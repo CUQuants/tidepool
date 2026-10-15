@@ -57,7 +57,8 @@ def create_default_config(config_path: str):
             'roll_interval_seconds': 60,
             'max_rows_per_file': 500000,
             'compression': 'lz4',
-            'queue_maxsize': 200000
+            'queue_maxsize': 200000,
+            'snapshot_interval_seconds': 300
         }
     }
     
