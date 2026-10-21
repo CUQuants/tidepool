@@ -1,6 +1,4 @@
-asyncio
 pyaml
-logging
-websockets
+websockets>=14.0
 aiohttp
 pyarrow
