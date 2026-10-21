@@ -123,13 +123,19 @@ class KrakenWebSocket:
 
     # --- Public Market Data Unsubscription Methods (v2 format) ---
 
-    async def unsubscribe_book(self, symbols: List[str]):
-        """Unsubscribe from order book data using v2 format."""
+    async def unsubscribe_book(self, symbols: List[str], depth: int = 10):
+        """Unsubscribe from order book data using v2 format.
+
+        Kraken finds the subscription by its depth, so ``depth`` must equal the
+        depth that was subscribed. A different depth is refused with
+        "Subscription with depth N not Found".
+        """
         subscription = {
             "method": "unsubscribe",
             "params": {
                 "channel": "book",
-                "symbol": symbols
+                "symbol": symbols,
+                "depth": depth
             }
         }
         
