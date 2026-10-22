@@ -6,7 +6,8 @@ import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
-from src.storage.hot_writer import BOOK_DELTA_SCHEMA, BOOK_SNAPSHOT_SCHEMA, TRADE_SCHEMA, HotParquetWriter, parse_ts_ns
+from src.storage.hot_writer import (BOOK_DELTA_SCHEMA, BOOK_SNAPSHOT_SCHEMA, GAP_SCHEMA, TRADE_SCHEMA,
+                                     HotParquetWriter, parse_ts_ns)
 
 FILE_RE = re.compile(r"^ts_(\d+)_(\d+)(_\d+)?\.parquet$")
 
@@ -17,17 +18,18 @@ def test_parse_ts_ns():
 
 
 def _book_row(ts, symbol, seq=None):
-    return {"ts": ts, "recv_ts": ts + 5, "seq": ts if seq is None else seq, "symbol": symbol, "checksum": 1,
+    return {"ts": ts, "recv_ts": ts + 5, "seq": ts if seq is None else seq, "run_id": "r1", "symbol": symbol,
+            "checksum": 1,
             "bid_1_price": 100.0, "bid_1_qty": 1.0, "ask_1_price": 101.0, "ask_1_qty": 2.0}
 
 
 def _delta_row(ts, seq, symbol, side="bid", price=100.0, qty=1.0):
-    return {"ts": ts, "recv_ts": ts + 5, "seq": seq, "symbol": symbol,
+    return {"ts": ts, "recv_ts": ts + 5, "seq": seq, "run_id": "r1", "symbol": symbol,
             "side": side, "price": price, "qty": qty, "checksum": 7}
 
 
 def _trade_row(ts, symbol, trade_id):
-    return {"ts": ts, "recv_ts": ts + 5, "symbol": symbol, "side": "buy", "price": 100.5,
+    return {"ts": ts, "recv_ts": ts + 5, "run_id": "r1", "symbol": symbol, "side": "buy", "price": 100.5,
             "qty": 0.25, "ord_type": "limit", "trade_id": trade_id}
 
 
@@ -117,3 +119,22 @@ def test_deltas_sort_by_seq_not_ts(tmp_path):
     deltas = ds.dataset(os.path.join(base, "book_delta"), format="parquet").to_table()
     assert deltas.schema.equals(BOOK_DELTA_SCHEMA)
     assert deltas["seq"].to_pylist() == [1, 2, 3]
+
+
+def test_gap_rows_bypass_the_queue_and_are_written(tmp_path):
+    """Gap rows go straight to the buffer, so a full queue can't drop them."""
+    base = str(tmp_path / "hot")
+    gap = {"ts": 30, "run_id": "r1", "symbol": "BTC/USD", "stream": "book", "kind": "disconnect",
+           "start_ts": 10, "end_ts": 20, "detail": "closed by Kraken"}
+
+    async def scenario():
+        queue = asyncio.Queue(maxsize=1)
+        queue.put_nowait(("trade", _trade_row(1, "BTC/USD", 1)))
+        writer = HotParquetWriter(queue, base_dir=base, roll_interval_s=3600)
+        writer.append("gap", gap)
+        await writer.stop()
+
+    asyncio.run(scenario())
+    gaps = ds.dataset(os.path.join(base, "gap"), format="parquet").to_table()
+    assert gaps.schema.equals(GAP_SCHEMA)
+    assert gaps.to_pylist() == [gap]

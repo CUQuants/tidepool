@@ -41,9 +41,9 @@ storage:
 
 # Kraken WebSocket configuration (optional)
 kraken:
-  # Add any Kraken-specific settings here
-  reconnect_interval: 30  # seconds
-  heartbeat_timeout: 60   # seconds
+  ws_url: wss://ws.kraken.com/v2  # public market data; no credentials needed
+  reconnect_interval: 30  # seconds to wait when reconnecting gives up (for example HTTP 403); drops reconnect at once
+  heartbeat_timeout: 60   # seconds with no frame before the connection is closed and opened again
 
 # Monitoring (future feature)
 monitoring:

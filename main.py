@@ -59,6 +59,11 @@ def create_default_config(config_path: str):
             'compression': 'lz4',
             'queue_maxsize': 200000,
             'snapshot_interval_seconds': 300
+        },
+        'kraken': {
+            'ws_url': 'wss://ws.kraken.com/v2',
+            'reconnect_interval': 30,
+            'heartbeat_timeout': 60
         }
     }
     
@@ -87,6 +92,7 @@ class TidePoolRunner:
         self.restart_delay = config.get('restart_delay', 5)
         self.log_level = config.get('log_level', 'INFO')
         self.storage_cfg = config.get('storage', {})
+        self.kraken_cfg = config.get('kraken', {})
         self.collector: Optional[TidePoolCollector] = None
         self.should_restart = True
         
@@ -94,7 +100,7 @@ class TidePoolRunner:
         """Run a single instance of the collector"""
         try:
             logger.info("Starting TidePool Collector...")
-            self.collector = TidePoolCollector(self.markets, self.storage_cfg)
+            self.collector = TidePoolCollector(self.markets, self.storage_cfg, self.kraken_cfg)
             await self.collector.run()
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt, shutting down...")

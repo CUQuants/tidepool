@@ -22,7 +22,8 @@ BOOK_DEPTH = 25
 _ORDER_FIELDS = [
     pa.field("ts", pa.int64(), nullable=False),        # exchange timestamp
     pa.field("recv_ts", pa.int64(), nullable=False),   # our receive time
-    pa.field("seq", pa.int64(), nullable=False),       # per-process message counter; restarts begin with a snapshot
+    pa.field("seq", pa.int64(), nullable=False),       # message counter within one run
+    pa.field("run_id", pa.string(), nullable=False),   # one collector process
     pa.field("symbol", pa.string(), nullable=False),
 ]
 
@@ -46,6 +47,7 @@ BOOK_SNAPSHOT_SCHEMA = pa.schema(_snapshot_fields)
 TRADE_SCHEMA = pa.schema([
     pa.field("ts", pa.int64(), nullable=False),
     pa.field("recv_ts", pa.int64(), nullable=False),
+    pa.field("run_id", pa.string(), nullable=False),
     pa.field("symbol", pa.string(), nullable=False),
     pa.field("side", pa.string()),
     pa.field("price", pa.float64()),
@@ -54,18 +56,32 @@ TRADE_SCHEMA = pa.schema([
     pa.field("trade_id", pa.int64()),
 ])
 
-SCHEMAS = {"book_delta": BOOK_DELTA_SCHEMA, "book_snapshot": BOOK_SNAPSHOT_SCHEMA, "trade": TRADE_SCHEMA}
+# One row per closed gap: a span where one stream of one symbol has missing or untrusted data.
+GAP_SCHEMA = pa.schema([
+    pa.field("ts", pa.int64(), nullable=False),        # when the row was written (collector clock)
+    pa.field("run_id", pa.string(), nullable=False),
+    pa.field("symbol", pa.string(), nullable=False),
+    pa.field("stream", pa.string(), nullable=False),   # "book" or "trade"
+    pa.field("kind", pa.string(), nullable=False),     # start, disconnect, resync or dropped_rows
+    pa.field("start_ts", pa.int64()),                  # last good data; null when unknown (start)
+    pa.field("end_ts", pa.int64()),                    # data good again; null if still open at shutdown
+    pa.field("detail", pa.string()),
+])
+
+SCHEMAS = {"book_delta": BOOK_DELTA_SCHEMA, "book_snapshot": BOOK_SNAPSHOT_SCHEMA, "trade": TRADE_SCHEMA,
+           "gap": GAP_SCHEMA}
 
 # Book rows must replay in arrival order, so they sort by seq; equal exchange timestamps can't order them.
 SORT_KEYS = {
     "book_delta": [("symbol", "ascending"), ("seq", "ascending")],
     "book_snapshot": [("symbol", "ascending"), ("seq", "ascending")],
     "trade": [("symbol", "ascending"), ("ts", "ascending")],
+    "gap": [("symbol", "ascending"), ("ts", "ascending")],
 }
 
 # Low-cardinality string columns get dictionary encoding; timestamps get delta encoding.
 # The two sets must not overlap or pyarrow rejects the column_encoding.
-_DICT_COLUMNS = {"symbol", "side", "ord_type"}
+_DICT_COLUMNS = {"run_id", "symbol", "side", "ord_type", "stream", "kind"}
 _DELTA_COLUMNS = {"ts": "DELTA_BINARY_PACKED", "recv_ts": "DELTA_BINARY_PACKED", "seq": "DELTA_BINARY_PACKED"}
 
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
@@ -114,6 +130,11 @@ class HotParquetWriter:
 
     def _rows(self, stream: str) -> int:
         return len(self._buffers[stream]["ts"])
+
+    def append(self, stream: str, row: dict):
+        """Buffer a row directly, not through the queue, so it can't be dropped when the
+        queue is full. For rare rows that must not be lost, such as gap rows."""
+        self._append(stream, row)
 
     def _append(self, stream: str, row: dict):
         buf = self._buffers.get(stream)
