@@ -268,12 +268,17 @@ class TidePoolCollector:
         while True:
             await asyncio.sleep(self.snapshot_interval_s)
             try:
-                logger.info("Resyncing order books from a fresh snapshot")
-                await self.client.unsubscribe_book(self.markets)
-                # No handler: handle_message is already registered for 'book'
-                await self.client.subscribe_book(self.markets, depth=BOOK_DEPTH)
+                await self.resync_once()
             except Exception as e:
                 logger.error(f"Order book resync failed: {e}")
+
+    async def resync_once(self):
+        """Unsubscribe and subscribe the book again. The unsubscribe must name the
+        subscribed depth, or Kraken refuses it and the subscribe gets "Already subscribed"."""
+        logger.info("Resyncing order books from a fresh snapshot")
+        await self.client.unsubscribe_book(self.markets, depth=BOOK_DEPTH)
+        # No handler: handle_message is already registered for 'book'
+        await self.client.subscribe_book(self.markets, depth=BOOK_DEPTH)
 
     async def run(self) -> None:
         """

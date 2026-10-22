@@ -61,6 +61,25 @@ def test_resync_snapshot_replaces_drifted_book():
     assert [s for s, _ in _drain(c)] == ["book_snapshot", "book_delta", "book_snapshot"]
 
 
+def test_resync_unsubscribes_at_the_subscribed_depth():
+    """Kraken finds a book subscription by its depth, so the unsubscribe must
+    send the same depth as the subscribe."""
+    c = _collector()
+    sent = []
+
+    async def capture(frame):
+        sent.append(frame)
+
+    c.client._send_public_subscription = capture
+
+    asyncio.run(c.resync_once())
+
+    unsubscribe, subscribe = sent
+    assert unsubscribe["method"] == "unsubscribe" and subscribe["method"] == "subscribe"
+    assert unsubscribe["params"] == subscribe["params"]
+    assert subscribe["params"]["depth"] == BOOK_DEPTH
+
+
 def test_book_truncated_to_depth():
     c = _collector()
     bids = [(float(1000 - i), 1.0) for i in range(BOOK_DEPTH)]
