@@ -70,12 +70,12 @@ GAP_SCHEMA = pa.schema([
 
 # Kraken status has no exchange timestamp; ts is the collector's receive time.
 STATUS_SCHEMA = pa.schema([
-    pa.field("ts", pa.int64(), nullable=False),
-    pa.field("run_id", pa.string(), nullable=False),
-    pa.field("seq", pa.int64(), nullable=False),
-    pa.field("system", pa.string(), nullable=False),
-    pa.field("source", pa.string(), nullable=False),
-    pa.field("details", pa.string()),
+    pa.field("ts", pa.int64(), nullable=False),       # collector receive time
+    pa.field("run_id", pa.string(), nullable=False),   # collector process
+    pa.field("seq", pa.int64(), nullable=False),       # event order within the run
+    pa.field("system", pa.string(), nullable=False),   # Kraken state, or "unknown"
+    pa.field("source", pa.string(), nullable=False),   # connect, disconnect, or update
+    pa.field("details", pa.string()),                   # original Kraken status item as JSON
 ])
 
 SCHEMAS = {"book_delta": BOOK_DELTA_SCHEMA, "book_snapshot": BOOK_SNAPSHOT_SCHEMA, "trade": TRADE_SCHEMA,

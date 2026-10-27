@@ -196,6 +196,7 @@ def test_exchange_status_is_stored_across_disconnect_and_reconnect(tmp_path):
         first = kraken.accept()
         task = asyncio.create_task(c.run())
         await until(lambda: subscribed(c, first))
+        # Simulate Kraken's initial state followed by a maintenance change.
         first.push(status("online"))
         first.push(status("maintenance"))
         await until(lambda: "maintenance" in c.writer._buffers["status"]["system"])

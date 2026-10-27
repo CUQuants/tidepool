@@ -261,6 +261,7 @@ class TidePoolCollector:
         if 'method' in data:
             self._on_reply(data, recv_ts)
         elif data.get('channel') == 'status' and data.get('type') == 'update':
+            # One Kraken frame can contain several status updates.
             self.seq += 1
             items = data.get('data') if isinstance(data.get('data'), list) else []
             if not items:
@@ -279,6 +280,7 @@ class TidePoolCollector:
         return None
 
     def _write_status(self, system: str, source: str, ts: int, details=None, *, increment=True) -> None:
+        """Store an exchange-wide status change or an unknown connection boundary."""
         if increment:
             self.seq += 1
         row = {'ts': ts, 'run_id': self.run_id, 'seq': self.seq, 'system': system,
