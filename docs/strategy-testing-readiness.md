@@ -4,7 +4,7 @@ What the collector gives you for replay, backtesting and model training, what is
 
 ## What is collected today
 
-Four hot-tier streams under `data/hot/`, all from the Kraken v2 public WebSocket:
+Five hot-tier streams under `data/hot/`, from the Kraken v2 public WebSocket and collector connection events:
 
 | Stream | One row per | Key columns |
 |---|---|---|
@@ -12,11 +12,13 @@ Four hot-tier streams under `data/hot/`, all from the Kraken v2 public WebSocket
 | `book_snapshot` | Kraken snapshot (startup + every `snapshot_interval_seconds`) | `ts`, `recv_ts`, `seq`, `symbol`, `checksum`, `bid_1..25_price/qty`, `ask_1..25_price/qty` |
 | `trade` | trade | `ts`, `recv_ts`, `symbol`, `side` (taker), `price`, `qty`, `ord_type`, `trade_id` |
 | `gap` | span with missing or untrusted data, per symbol and stream | `symbol`, `stream` (`book` or `trade`), `kind`, `start_ts`, `end_ts`, `detail` |
+| `status` | exchange status update or connection boundary | `ts` (receive time), `run_id`, `seq`, `system`, `source`, `details` |
 
 - `ts` is Kraken's timestamp and `recv_ts` is the collector's clock, both in ns since epoch. `recv_ts - ts` is the observed feed latency.
 - `seq` orders book rows in arrival order within one run. `run_id` names the run and is on every row.
 - A `gap` row has `kind` `start`, `disconnect`, `resync` or `dropped_rows`. `start_ts` is the last good data (null for `start`). `end_ts` is when the data is good again: the next stored snapshot for `book`, the confirmed subscription or next stored trade for `trade`. It is null if the gap was still open at shutdown.
 - Book depth is 25 levels per side. Markets are whatever `config.yaml` lists (currently FX and stablecoin pairs).
+- `status` applies to the whole exchange. Exclude unknown periods, including after a disconnect or collector crash; don't carry a status across runs. Kraken's status channel has no exchange timestamp, so the transition is known only when received.
 
 ### What this is enough for
 - Rebuilding the L2 book (top 25) at any point in time.
@@ -56,7 +58,7 @@ Things a realistic simulator needs, and where each comes from:
 | Fees | Kraken fee tier for the account | not collected; hardcode per tier for now |
 | Tick size, lot size, min order, price/lot decimals | Kraken `instrument` channel or REST `AssetPairs` | not collected |
 | Exact queue position for resting orders | Kraken `level3` channel (individual orders) | not collected |
-| Exchange status, halts, maintenance | Kraken `status` channel | not collected |
+| Exchange status, halts, maintenance | Kraken `status` channel | collected; unknown during connection gaps |
 
 Guidelines:
 - **Decide on what you would have seen.** Index decisions by `recv_ts`, not `ts`. The strategy can only act once data reaches it.
@@ -76,7 +78,6 @@ In rough order of value:
 3. **Level3 data** (`level3` channel, authenticated), only if a market-making strategy needs real queue position. It is much larger than L2.
 4. **Fee schedule** for the trading account, stored with an effective date.
 5. **Our own orders and fills** from the trading gateway's audit log, joined to market data, to compare simulated against real fills (slippage and fill-rate calibration).
-6. **Exchange status** (`status` channel), to exclude maintenance and cancel-only periods.
 
 ## System improvements
 

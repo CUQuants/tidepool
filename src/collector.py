@@ -159,6 +159,7 @@ class TidePoolCollector:
         self._needs_resync.clear()
         self._close_reason = None
         self._last_frame_ns = time.time_ns()
+        self._write_status('unknown', 'connect', self._last_frame_ns)
         self._next_resync = time.monotonic() + (self.snapshot_interval_s or 0)
         logger.info(f"Connected to {self.url} (run {self.run_id})")
         maintain = asyncio.create_task(self._maintain(conn))
@@ -184,6 +185,8 @@ class TidePoolCollector:
             reason = f"{type(exc).__name__}: {exc}"
         finally:
             maintain.cancel()
+            # The status after the last received frame is unknown until reconnect.
+            self._write_status('unknown', 'disconnect', self._last_frame_ns)
         reason = self._close_reason or reason
         for symbol in self.markets:
             for stream in (BOOK, TRADE):
@@ -257,6 +260,15 @@ class TidePoolCollector:
 
         if 'method' in data:
             self._on_reply(data, recv_ts)
+        elif data.get('channel') == 'status' and data.get('type') == 'update':
+            self.seq += 1
+            items = data.get('data') if isinstance(data.get('data'), list) else []
+            if not items:
+                self._write_status('unknown', 'update', recv_ts, increment=False)
+            for index, item in enumerate(items):
+                system = item.get('system') if isinstance(item, dict) else None
+                self._write_status(system if isinstance(system, str) and system else 'unknown',
+                                   'update', recv_ts, item, increment=index > 0)
         elif 'channel' in data and 'type' in data and 'data' in data:
             self.seq += 1
             if data['type'] == 'snapshot':
@@ -265,6 +277,17 @@ class TidePoolCollector:
                 self.process_update_message(data, recv_ts)
         # Anything else (heartbeat) only counts as a frame for the silence check
         return None
+
+    def _write_status(self, system: str, source: str, ts: int, details=None, *, increment=True) -> None:
+        if increment:
+            self.seq += 1
+        row = {'ts': ts, 'run_id': self.run_id, 'seq': self.seq, 'system': system,
+               'source': source, 'details': json.dumps(details) if details is not None else None}
+        try:
+            self.queue.put_nowait(('status', row))
+        except asyncio.QueueFull:
+            # A missed status change would make an unsafe trading window look valid.
+            self.writer.append('status', row)
 
     def _on_reply(self, data: dict, recv_ts: int) -> None:
         """Kraken answers a request once per symbol."""

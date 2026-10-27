@@ -24,13 +24,14 @@ data/
 
 ## Order book streams
 
-The collector writes four hot-tier streams: `book_delta`, `book_snapshot`, `trade` and `gap`.
+The collector writes five hot-tier streams: `book_delta`, `book_snapshot`, `trade`, `gap` and `status`.
 
 - `book_delta`: one row per changed price level, as Kraken sent it (`side`, `price`, `qty`; `qty == 0` removes the level).
 - `book_snapshot`: one wide row (top 25 bids and asks) per Kraken snapshot. Snapshots arrive on subscribe and on every resync. Each resync unsubscribes and resubscribes the book channel every `storage.snapshot_interval_seconds` (default 300), because Kraken v2 cannot send a snapshot on a live subscription. The resync recovers from missed updates.
 - Every row has `ts` (Kraken's exchange timestamp, ns) and `recv_ts` (our receive time, ns). If Kraken omits the timestamp, `ts` falls back to `recv_ts` and a warning is logged.
 - `seq` is a message counter within one run, and `run_id` names the run. Book rows are sorted by `(symbol, seq)` so they replay in arrival order. Every new connection begins with a snapshot.
 - `gap`: one row per span where one stream (`book` or `trade`) of one symbol has missing or untrusted data, with `kind`, `start_ts`, `end_ts` and `detail`. Gap rows bypass the write queue, so a full queue can't drop them.
+- `status`: exchange-wide trading-engine state (`online`, `cancel_only`, `maintenance`, `post_only`, or an unknown future value). Kraken sends it automatically on connection and changes. `ts` is receive time in ns because this channel has no exchange timestamp; `details` contains the original data object as JSON. Rows with `system = unknown` mark connection starts, disconnects, or malformed updates. Sort by `seq` within `run_id`, and treat intervals between runs or after a crash as unknown. Status rows bypass a full queue.
 - `checksum` is Kraken's CRC32 of the top 10 levels after that message. It is stored for offline verification and is not checked live.
 - To replay the book: take the latest `book_snapshot` row for the symbol, then apply `book_delta` rows with the same `run_id` and a greater `seq`. Trim each side to 25 levels after each message, since Kraken does not send removals for levels pushed past the subscribed depth.
 
