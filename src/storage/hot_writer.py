@@ -68,8 +68,18 @@ GAP_SCHEMA = pa.schema([
     pa.field("detail", pa.string()),
 ])
 
+# Kraken status has no exchange timestamp; ts is the collector's receive time.
+STATUS_SCHEMA = pa.schema([
+    pa.field("ts", pa.int64(), nullable=False),       # collector receive time
+    pa.field("run_id", pa.string(), nullable=False),   # collector process
+    pa.field("seq", pa.int64(), nullable=False),       # event order within the run
+    pa.field("system", pa.string(), nullable=False),   # Kraken state, or "unknown"
+    pa.field("source", pa.string(), nullable=False),   # connect, disconnect, or update
+    pa.field("details", pa.string()),                   # original Kraken status item as JSON
+])
+
 SCHEMAS = {"book_delta": BOOK_DELTA_SCHEMA, "book_snapshot": BOOK_SNAPSHOT_SCHEMA, "trade": TRADE_SCHEMA,
-           "gap": GAP_SCHEMA}
+           "gap": GAP_SCHEMA, "status": STATUS_SCHEMA}
 
 # Book rows must replay in arrival order, so they sort by seq; equal exchange timestamps can't order them.
 SORT_KEYS = {
@@ -77,11 +87,12 @@ SORT_KEYS = {
     "book_snapshot": [("symbol", "ascending"), ("seq", "ascending")],
     "trade": [("symbol", "ascending"), ("ts", "ascending")],
     "gap": [("symbol", "ascending"), ("ts", "ascending")],
+    "status": [("seq", "ascending")],
 }
 
 # Low-cardinality string columns get dictionary encoding; timestamps get delta encoding.
 # The two sets must not overlap or pyarrow rejects the column_encoding.
-_DICT_COLUMNS = {"run_id", "symbol", "side", "ord_type", "stream", "kind"}
+_DICT_COLUMNS = {"run_id", "symbol", "side", "ord_type", "stream", "kind", "system", "source"}
 _DELTA_COLUMNS = {"ts": "DELTA_BINARY_PACKED", "recv_ts": "DELTA_BINARY_PACKED", "seq": "DELTA_BINARY_PACKED"}
 
 _EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)

@@ -185,6 +185,55 @@ def test_a_dropped_connection_is_reconnected_and_subscribed_again(tmp_path):
     asyncio.run(scenario())
 
 
+def test_exchange_status_is_stored_across_disconnect_and_reconnect(tmp_path):
+    kraken = FakeKraken()
+
+    def status(system):
+        return {"channel": "status", "type": "update", "data": [{"system": system, "api_version": "v2"}]}
+
+    async def scenario():
+        c = make(tmp_path, kraken, markets=["BTC/USD"])
+        first = kraken.accept()
+        task = asyncio.create_task(c.run())
+        await until(lambda: subscribed(c, first))
+        # Simulate Kraken's initial state followed by a maintenance change.
+        first.push(status("online"))
+        first.push(status("maintenance"))
+        await until(lambda: "maintenance" in c.writer._buffers["status"]["system"])
+
+        second = kraken.accept()
+        first.drop()
+        await until(lambda: subscribed(c, second))
+        second.push(status("cancel_only"))
+        await until(lambda: "cancel_only" in c.writer._buffers["status"]["system"])
+        await stop(task)
+
+    asyncio.run(scenario())
+    events = sorted(rows(tmp_path, "status"), key=lambda row: row["seq"])
+    assert [(e["source"], e["system"]) for e in events] == [
+        ("connect", "unknown"), ("update", "online"), ("update", "maintenance"),
+        ("disconnect", "unknown"), ("connect", "unknown"), ("update", "cancel_only"),
+        ("disconnect", "unknown"),
+    ]
+    assert json.loads(events[1]["details"])["api_version"] == "v2"
+    assert events[2]["ts"] == events[3]["ts"]
+    assert len({e["run_id"] for e in events}) == 1
+
+
+def test_status_survives_a_full_queue_and_malformed_update(tmp_path):
+    async def scenario():
+        c = TidePoolCollector(["BTC/USD"], {"hot_dir": str(tmp_path), "queue_maxsize": 1})
+        c.queue.put_nowait(("trade", {"ts": 1, "recv_ts": 1, "run_id": c.run_id, "symbol": "BTC/USD"}))
+        await c.handle_message({"channel": "status", "type": "update", "data": [{"system": "post_only"}]}, 10)
+        await c.handle_message({"channel": "status", "type": "update", "data": [{}]}, 20)
+        await c.handle_message({"channel": "status", "type": "update"}, 30)
+        await c.writer.stop()
+
+    asyncio.run(scenario())
+    events = sorted(rows(tmp_path, "status"), key=lambda row: row["seq"])
+    assert [(e["ts"], e["system"]) for e in events] == [(10, "post_only"), (20, "unknown"), (30, "unknown")]
+
+
 def test_a_new_connection_starts_from_its_own_snapshot(tmp_path):
     kraken = FakeKraken()
 
