@@ -35,7 +35,7 @@ Settings users can change:
 * Only delete local copy after verify upload
 * Upload runs independently of collection
 * Before uploading check whether indentical file is already uploaded to cloud storage
-* Keep upload state in `data/archive_state.sqlite` on a persistent volume, outside Git
+* Keep upload state in `data/archive_state.sqlite` on a persistent volume
 * Track file path, cloud destination, checksum, status, attempts, and confirmation time
 * Record success in SQLite only after verifying the cloud copy
 * Use a consistent cloud path and compare local and cloud file sizes and checksums
