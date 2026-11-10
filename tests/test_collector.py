@@ -1,6 +1,6 @@
 import asyncio
 
-from src.collector import TidePoolCollector
+from src.collector import KrakenCollector
 from src.storage.hot_writer import BOOK_DEPTH, parse_ts_ns
 
 TS1 = "2025-09-01T20:11:35.911390Z"
@@ -8,7 +8,7 @@ TS2 = "2025-09-01T20:11:36.000001Z"
 
 
 def _collector():
-    return TidePoolCollector(["BTC/USD"], {"queue_maxsize": 10_000})
+    return KrakenCollector(["BTC/USD"], {"queue_maxsize": 10_000})
 
 
 def _drain(c):

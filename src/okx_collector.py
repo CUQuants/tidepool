@@ -6,7 +6,8 @@ import os
 import time
 from pathlib import Path
 
-from src.collector import BOOK, TRADE, TidePoolCollector
+from src.collector_base import BOOK, TRADE, TidePoolCollector
+from src.storage.hot_writer import BOOK_DEPTH
 
 logger = logging.getLogger(__name__)
 
@@ -15,10 +16,11 @@ class OKXCollector(TidePoolCollector):
     def __init__(self, markets, storage_cfg=None, okx_cfg=None, *, client_factory=None):
         storage = dict(storage_cfg or {})
         storage['hot_dir'] = str(Path(storage.get('hot_dir', 'data/hot')) / 'okx')
-        super().__init__(markets, storage, {})
+        super().__init__(markets, storage)
         self.okx_cfg = okx_cfg or {}
         self.client_factory = client_factory or self._make_client
         self.exchange_seq = {}
+        self.exchange_ts = {}
         self.last_good = {}
         self.client = None
         self._restart_task = None
@@ -41,6 +43,7 @@ class OKXCollector(TidePoolCollector):
                 self._open_gap(symbol, stream, 'disconnect', self.last_good.get((symbol, stream)), reason)
         self.orderbooks.clear()
         self.exchange_seq.clear()
+        self.exchange_ts.clear()
 
     def _restart(self, reason):
         logger.warning('Restarting OKX feed: %s', reason)
@@ -83,11 +86,13 @@ class OKXCollector(TidePoolCollector):
         seq = int(item['seqId'])
         if action == 'snapshot':
             book = {'bids': {}, 'asks': {}}
+            before = None
         elif action == 'update' and symbol in self.orderbooks:
             if int(item['prevSeqId']) != self.exchange_seq[symbol]:
                 self._restart(f'book sequence gap for {symbol}')
                 return
             book = self.orderbooks[symbol]
+            before = self._top_levels(book)
         else:
             # A shared gateway subscription may not send a snapshot to a late joiner.
             return
@@ -102,21 +107,59 @@ class OKXCollector(TidePoolCollector):
             book[side] = dict(sorted(book[side].items(), reverse=side == 'bids')[:400])
         self.orderbooks[symbol] = book
         self.exchange_seq[symbol] = seq
+        self.exchange_ts[symbol] = ts
         self.seq += 1
-        row = {'ts': ts, 'recv_ts': recv_ts, 'seq': self.seq, 'symbol': symbol, 'checksum': None}
-        for side in ('bids', 'asks'):
-            for index, (price, qty) in enumerate(list(book[side].items())[:25], 1):
-                row[f'{side[:-1]}_{index}_price'] = price
-                row[f'{side[:-1]}_{index}_qty'] = qty
-        # Complete top-25 images keep replay correct when deeper levels move up.
-        if self._enqueue('book_snapshot', row):
+        if action == 'snapshot':
+            stored = self._write_snapshot(symbol, ts, recv_ts)
+        else:
+            stored = self._write_deltas(symbol, before, self._top_levels(book), ts, recv_ts)
+        if stored:
             self._close_gap(symbol, BOOK, recv_ts)
             self.last_good[(symbol, BOOK)] = recv_ts
         else:
+            # A partially written message is untrusted from the last complete one.
+            self.gaps[(symbol, BOOK)] = ('dropped_rows', self.last_good.get((symbol, BOOK)), None)
             self._restart('book row dropped')
+
+    @staticmethod
+    def _top_levels(book):
+        return {side: dict(list(book[side].items())[:BOOK_DEPTH]) for side in ('bids', 'asks')}
+
+    def _write_snapshot(self, symbol, ts, recv_ts):
+        row = {'ts': ts, 'recv_ts': recv_ts, 'seq': self.seq, 'symbol': symbol, 'checksum': None}
+        for side, levels in self._top_levels(self.orderbooks[symbol]).items():
+            for index, (price, qty) in enumerate(levels.items(), 1):
+                row[f'{side[:-1]}_{index}_price'] = price
+                row[f'{side[:-1]}_{index}_qty'] = qty
+        return self._enqueue('book_snapshot', row)
+
+    def _write_deltas(self, symbol, before, after, ts, recv_ts):
+        base = {'ts': ts, 'recv_ts': recv_ts, 'seq': self.seq, 'symbol': symbol, 'checksum': None}
+        for side in ('bids', 'asks'):
+            # Include promotions from deeper levels, even if OKX didn't update them.
+            prices = set(before[side]) | set(after[side])
+            for price in sorted(prices, reverse=side == 'bids'):
+                qty = after[side].get(price, 0.0)
+                if before[side].get(price, 0.0) != qty:
+                    if not self._enqueue('book_delta', {**base, 'side': side[:-1], 'price': price, 'qty': qty}):
+                        return False
+        return True
+
+    async def _periodic_snapshots(self):
+        while True:
+            await asyncio.sleep(self.snapshot_interval_s)
+            for symbol in list(self.orderbooks):
+                if (symbol, BOOK) in self.gaps:
+                    continue
+                self.seq += 1
+                if not self._write_snapshot(symbol, self.exchange_ts[symbol], time.time_ns()):
+                    self._restart('periodic snapshot dropped')
+                    break
 
     async def run(self):
         self.writer.start()
+        periodic = (asyncio.create_task(self._periodic_snapshots())
+                    if self.snapshot_interval_s and self.snapshot_interval_s > 0 else None)
         try:
             while True:
                 self.client = self.client_factory()
@@ -142,7 +185,7 @@ class OKXCollector(TidePoolCollector):
                     await self.client.stop()
                 await asyncio.sleep(self.okx_cfg.get('reconnect_interval', 5))
         finally:
-            for (symbol, stream), (kind, start, detail) in list(self.gaps.items()):
-                self._write_gap(symbol, stream, kind, start, None, detail)
-            self.gaps.clear()
-            await self.writer.stop()
+            if periodic:
+                periodic.cancel()
+                await asyncio.gather(periodic, return_exceptions=True)
+            await self._finish()

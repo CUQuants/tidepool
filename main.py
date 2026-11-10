@@ -11,7 +11,8 @@ import sys
 import yaml
 from pathlib import Path
 from typing import Optional, Dict, Any
-from src.collector import TidePoolCollector
+from src.collector import KrakenCollector
+from src.collector_base import TidePoolCollector
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ class TidePoolRunner:
         try:
             logger.info("Starting TidePool Collector...")
             if self.exchange == 'kraken':
-                self.collector = TidePoolCollector(self.markets, self.storage_cfg, self.kraken_cfg)
+                self.collector = KrakenCollector(self.markets, self.storage_cfg, self.kraken_cfg)
             elif self.exchange == 'okx':
                 from src.okx_collector import OKXCollector
                 self.collector = OKXCollector(self.markets, self.storage_cfg, self.okx_cfg)

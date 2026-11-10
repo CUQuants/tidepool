@@ -13,7 +13,7 @@ import pyarrow.dataset as ds
 import pytest
 
 import src.collector as collector
-from src.collector import TidePoolCollector
+from src.collector import KrakenCollector
 from src.storage.hot_writer import BOOK_DEPTH
 
 TS = "2025-09-01T20:11:35.911390Z"
@@ -144,7 +144,7 @@ def fast_loop(monkeypatch):
 
 
 def make(tmp_path, kraken, *, snapshot_interval=0, heartbeat_timeout=0, retry=30, markets=MARKETS):
-    return TidePoolCollector(markets, {"hot_dir": str(tmp_path), "roll_interval_seconds": 3600,
+    return KrakenCollector(markets, {"hot_dir": str(tmp_path), "roll_interval_seconds": 3600,
                                        "snapshot_interval_seconds": snapshot_interval},
                              {"heartbeat_timeout": heartbeat_timeout, "reconnect_interval": retry},
                              connect=kraken)
@@ -222,7 +222,7 @@ def test_exchange_status_is_stored_across_disconnect_and_reconnect(tmp_path):
 
 def test_status_survives_a_full_queue_and_malformed_update(tmp_path):
     async def scenario():
-        c = TidePoolCollector(["BTC/USD"], {"hot_dir": str(tmp_path), "queue_maxsize": 1})
+        c = KrakenCollector(["BTC/USD"], {"hot_dir": str(tmp_path), "queue_maxsize": 1})
         c.queue.put_nowait(("trade", {"ts": 1, "recv_ts": 1, "run_id": c.run_id, "symbol": "BTC/USD"}))
         await c.handle_message({"channel": "status", "type": "update", "data": [{"system": "post_only"}]}, 10)
         await c.handle_message({"channel": "status", "type": "update", "data": [{}]}, 20)
@@ -392,7 +392,7 @@ def test_resync_unsubscribes_at_the_subscribed_depth_and_gets_a_fresh_snapshot(t
 
 
 def test_dropped_rows_open_a_gap_and_resync_that_book(tmp_path):
-    c = TidePoolCollector(["BTC/USD"], {"hot_dir": str(tmp_path), "queue_maxsize": 1,
+    c = KrakenCollector(["BTC/USD"], {"hot_dir": str(tmp_path), "queue_maxsize": 1,
                                         "snapshot_interval_seconds": 0}, {"heartbeat_timeout": 0})
     conn = FakeConn()
 
@@ -417,7 +417,7 @@ def test_dropped_rows_open_a_gap_and_resync_that_book(tmp_path):
 
 
 def test_a_dropped_trade_opens_a_trade_gap_until_the_next_stored_trade(tmp_path):
-    c = TidePoolCollector(["BTC/USD"], {"hot_dir": str(tmp_path), "queue_maxsize": 1})
+    c = KrakenCollector(["BTC/USD"], {"hot_dir": str(tmp_path), "queue_maxsize": 1})
 
     def trade(i):
         return {"channel": "trade", "type": "update", "data": [{

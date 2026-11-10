@@ -24,8 +24,10 @@ def test_normalized_book_and_trade_are_persisted(tmp_path):
     asyncio.run(scenario())
     root = tmp_path / 'okx'
     rows = ds.dataset(root / 'book_snapshot', format='parquet').to_table().to_pylist()
-    assert [(r['symbol'], r['bid_1_price'], r['bid_1_qty']) for r in rows] == [
-        ('BTC/USDT', 100.0, 2.0), ('BTC/USDT', 99.0, 4.0)]
+    assert [(r['symbol'], r['bid_1_price'], r['bid_1_qty']) for r in rows] == [('BTC/USDT', 100.0, 2.0)]
+    deltas = ds.dataset(root / 'book_delta', format='parquet').to_table().to_pylist()
+    assert [(r['side'], r['price'], r['qty']) for r in deltas] == [('bid', 100.0, 0.0), ('bid', 99.0, 4.0)]
+    assert len({r['seq'] for r in deltas}) == 1
     trade = ds.dataset(root / 'trade', format='parquet').to_table().to_pylist()[0]
     assert (trade['ts'], trade['trade_id'], trade['qty'], trade['side']) == (1700000000001000000, 123, 0.5, 'buy')
     assert rows[0]['checksum'] is None
@@ -56,8 +58,38 @@ def test_deep_level_moves_into_top_25(tmp_path):
         await c.handle_okx(book('update', 2, 1, bids=[['100', '0']]))
         await c.writer.stop()
     asyncio.run(scenario())
+    root = tmp_path / 'okx'
+    snapshot = ds.dataset(root / 'book_snapshot', format='parquet').to_table().to_pylist()[0]
+    deltas = ds.dataset(root / 'book_delta', format='parquet').to_table().to_pylist()
+    # Replay the stored top 25, including a promotion that OKX didn't send.
+    replayed = {snapshot[f'bid_{i}_price']: snapshot[f'bid_{i}_qty'] for i in range(1, 26)}
+    for delta in deltas:
+        if delta['qty'] == 0:
+            replayed.pop(delta['price'], None)
+        else:
+            replayed[delta['price']] = delta['qty']
+    assert sorted(replayed, reverse=True) == list(range(99, 74, -1))
+    assert {(r['price'], r['qty']) for r in deltas} == {(100.0, 0.0), (75.0, 1.0)}
+
+
+def test_periodic_checkpoint_and_reconnect_snapshot(tmp_path):
+    async def scenario():
+        c = OKXCollector(['BTC/USDT'], {'hot_dir': str(tmp_path), 'snapshot_interval_seconds': 0.01})
+        await c.handle_okx(book('snapshot', 1, bids=[['100', '1']]))
+        await c.handle_okx(book('update', 2, 1, bids=[['99', '2']]))
+        checkpoint = asyncio.create_task(c._periodic_snapshots())
+        await asyncio.sleep(0.025)
+        checkpoint.cancel()
+        await asyncio.gather(checkpoint, return_exceptions=True)
+        await c.handle_okx({'event': 'upstream_status', 'status': 'reconnecting'})
+        await c.handle_okx(book('snapshot', 3, bids=[['98', '3']]))
+        await c.writer.stop()
+    asyncio.run(scenario())
     rows = ds.dataset(tmp_path / 'okx' / 'book_snapshot', format='parquet').to_table().to_pylist()
-    assert rows[-1]['bid_25_price'] == 75.0
+    rows.sort(key=lambda r: r['seq'])
+    assert rows[0]['bid_1_price'] == 100.0
+    assert any(row['bid_2_price'] == 99.0 for row in rows[1:-1])
+    assert rows[-1]['bid_1_price'] == 98.0
 
 
 def test_gateway_outage_opens_gaps_and_rejects_updates(tmp_path):
