@@ -10,6 +10,7 @@ Automatically upload Parquet files after a set delay to a set cloud destination.
 
 ## How it Works
 
+* Run the worker as a separate process, sharing the collector's persistent data directory
 * Background worker checks for files that match the delay
 * Upload them to cloud storage
 * Verify it is there
@@ -34,6 +35,13 @@ Settings users can change:
 * Only delete local copy after verify upload
 * Upload runs independently of collection
 * Before uploading check whether indentical file is already uploaded to cloud storage
+* Keep upload state in `data/archive_state.sqlite` on a persistent volume, outside Git
+* Track file path, cloud destination, checksum, status, attempts, and confirmation time
+* Record success in SQLite only after verifying the cloud copy
+* Use a consistent cloud path and compare local and cloud file sizes and checksums
+* Matching files are skipped; missing files are uploaded
+* If contents differ, keep the local file and report a conflict
+* Use the provider's checksum validation and check cloud storage again after restarts
 
 ## Testing and Success Criteria
 
