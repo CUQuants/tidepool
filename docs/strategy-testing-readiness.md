@@ -33,8 +33,8 @@ Five hot-tier streams under `data/hot/`, from the Kraken v2 public WebSocket and
 
 ## Replaying the book
 
-1. Pick a symbol and a start time `T`.
-2. Load the latest `book_snapshot` row for that symbol with `ts <= T`. That row is the starting book.
+1. Pick a symbol and a start time `T` measured by collector receive time (`recv_ts`).
+2. Load the latest usable `book_snapshot` row for that symbol with `recv_ts <= T`. That row is the starting book.
 3. Load `book_delta` rows for that symbol with the snapshot's `run_id` and a `seq` greater than the snapshot's `seq`, sorted by `seq`.
 4. For each group of rows sharing a `seq` (one Kraken message), apply every level (`qty == 0` removes it), then trim each side to 25 levels. Kraken does not send removals for levels pushed past the subscribed depth, so the trim is required.
 5. Optional: after each message, compute the CRC32 of the top 10 levels and compare with `checksum`. A mismatch means the rebuilt book is wrong from that point until the next snapshot.
@@ -44,7 +44,7 @@ Caveats:
 - Never apply deltas across a `book` gap or across runs. After a gap, start again from the snapshot at its `end_ts`.
 - Prices are stored as float64. Exact checksum checking needs the price and quantity text exactly as Kraken sent it, rebuilt using each pair's price and lot decimals.
 
-No replay loader exists in the repo yet. Writing one is the first piece of work under "Tooling".
+`src/replay.py` provides `replay_books(hot_dir, symbol, start_ts, end_ts)`. Times are collector receive times in nanoseconds, with an inclusive start and exclusive end. It yields one `BookEvent` per snapshot or complete delta message, skips book gaps, and starts fresh after each snapshot or collector run. Supply `price_decimals` and `qty_decimals` to check Kraken CRC32; these must match the exchange's original decimal formatting. Existing float64 rows cannot guarantee exact checksums for every pair, so a mismatch may also indicate lost precision. The loader reads closed hot Parquet files; live buffered rows are not included.
 
 ## Building a backtest on this data
 
@@ -93,13 +93,13 @@ In rough order of value:
 - **Schema versioning:** record a schema version in Parquet metadata so loaders can handle future column changes.
 
 ### Tooling
-- **Replay loader:** reads a symbol and time range, rebuilds the book step by step following "Replaying the book", and verifies checksums. For speed, use two fixed-size sorted arrays per book (numpy or numba) rather than a dict or tree.
+- **Replay loader:** `src/replay.py` rebuilds the book for a symbol and receive-time range, checks gaps, and optionally verifies checksums when the pair's decimal formatting is supplied. For large datasets, replace its in-memory row scan with file pruning and fixed-size arrays.
 - **Data quality report:** per symbol per day, coverage (time with valid data), gaps, checksum mismatch rate, latency percentiles.
 - **Backtest harness:** event loop over replayed book and trade events in `recv_ts` order, with the fill and latency rules above, fees and instrument rules.
 
 ## Suggested order
 
-1. Replay loader with checksum verification. This also tests that the collected data is correct.
+1. Replay loader (implemented); capture exact decimals and instrument metadata for reliable checksum verification.
 2. Instrument metadata and live checksum checking.
 3. Cold tier compaction and monitoring.
 4. Backtest harness and data quality report.
