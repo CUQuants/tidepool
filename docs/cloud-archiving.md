@@ -56,3 +56,4 @@ Settings users can change:
 * Delay
 * Local retention policy
 * What happends after retry limit is met
+* How to handle discrepancy between local and cloud copy
