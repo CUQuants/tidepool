@@ -3,6 +3,7 @@
 Main runner for TidePool Data Collector
 Automatically restarts the collector if it exits or crashes.
 """
+import argparse
 import asyncio
 import logging
 import signal
@@ -93,6 +94,8 @@ class TidePoolRunner:
         self.log_level = config.get('log_level', 'INFO')
         self.storage_cfg = config.get('storage', {})
         self.kraken_cfg = config.get('kraken', {})
+        self.exchange = config.get('exchange', 'kraken')
+        self.okx_cfg = config.get('okx', {})
         self.collector: Optional[TidePoolCollector] = None
         self.should_restart = True
         
@@ -100,7 +103,13 @@ class TidePoolRunner:
         """Run a single instance of the collector"""
         try:
             logger.info("Starting TidePool Collector...")
-            self.collector = TidePoolCollector(self.markets, self.storage_cfg, self.kraken_cfg)
+            if self.exchange == 'kraken':
+                self.collector = TidePoolCollector(self.markets, self.storage_cfg, self.kraken_cfg)
+            elif self.exchange == 'okx':
+                from src.okx_collector import OKXCollector
+                self.collector = OKXCollector(self.markets, self.storage_cfg, self.okx_cfg)
+            else:
+                raise ValueError(f'Unknown exchange: {self.exchange}')
             await self.collector.run()
         except KeyboardInterrupt:
             logger.info("Received keyboard interrupt, shutting down...")
@@ -142,12 +151,12 @@ def signal_handler(signum, frame):
     if runner_instance:
         runner_instance.stop()
 
-async def main():
+async def main(config_path='config.yaml'):
     """Main entry point"""
     global runner_instance
     
     # Load configuration
-    config = load_config()
+    config = load_config(config_path)
     
     # Setup logging based on config
     setup_logging(config)
@@ -181,7 +190,9 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        parser = argparse.ArgumentParser(description='Collect market data')
+        parser.add_argument('--config', default='config.yaml')
+        asyncio.run(main(parser.parse_args().config))
     except KeyboardInterrupt:
         logger.info("Process terminated by user")
     except Exception as e:

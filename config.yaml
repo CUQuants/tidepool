@@ -1,5 +1,8 @@
 # TidePool Data Collector Configuration
 
+# Run one collector per process. OKX output is stored under data/hot/okx.
+exchange: kraken
+
 # Market pairs to collect data from
 # Use Kraken's pair notation (e.g., BTC/USD, ETH/USD)
 markets:
