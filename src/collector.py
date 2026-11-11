@@ -32,23 +32,20 @@ counts messages within a run.
 import asyncio
 import json
 import logging
-import secrets
 import time
 from collections.abc import AsyncIterable, Callable
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from websockets.exceptions import ConnectionClosed
 
-from src.storage.hot_writer import BOOK_DEPTH, HotParquetWriter, parse_ts_ns
+from src.storage.hot_writer import BOOK_DEPTH, parse_ts_ns
+from src.collector_base import BOOK, TRADE, TidePoolCollector
 
 logger = logging.getLogger(__name__)
 
 KRAKEN_WS_URL = "wss://ws.kraken.com/v2"
 MAINTAIN_INTERVAL_S = 1.0
 RECONNECT_PAUSE_S = 1.0                   # After a drop; websockets reconnects at once otherwise
-
-BOOK, TRADE = "book", "trade"
 
 # (url, note_error) → connections, one per (re)connect. ``note_error`` is told
 # about every failed attempt.
@@ -68,12 +65,7 @@ def ws_connect(url: str, note_error: Callable[[Exception], None]) -> AsyncIterab
     return connect(url, open_timeout=10, ping_interval=20, ping_timeout=20, process_exception=classify)
 
 
-def new_run_id() -> str:
-    """Start time plus a random suffix, so run ids sort by time and are unique."""
-    return f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{secrets.token_hex(3)}"
-
-
-class TidePoolCollector:
+class KrakenCollector(TidePoolCollector):
     """
     TidePool Data Collector
     Real-time orderbook and trade data collector for the TidePool dataset.
@@ -81,41 +73,12 @@ class TidePoolCollector:
     """
     def __init__(self, markets: list[str], storage_cfg: Optional[Dict[str, Any]] = None,
                  kraken_cfg: Optional[Dict[str, Any]] = None, *, connect: Connect = ws_connect):
-        storage_cfg = storage_cfg or {}
+        super().__init__(markets, storage_cfg)
         kraken_cfg = kraken_cfg or {}
-        self.markets = markets
         self.url = kraken_cfg.get('ws_url', KRAKEN_WS_URL)
         self.retry_s = kraken_cfg.get('reconnect_interval', 30)
         self.heartbeat_timeout_s = kraken_cfg.get('heartbeat_timeout', 60)
-        self.run_id = new_run_id()
         self._connect = connect
-
-        # Dictionary to store full orderbook state for each symbol
-        # Format: {symbol: {'bids': {price: qty}, 'asks': {price: qty}}}
-        self.orderbooks: Dict[str, Dict[str, Dict[float, float]]] = {}
-
-        # Rows go websocket handler -> queue -> hot-tier Parquet writer task
-        self.queue: asyncio.Queue = asyncio.Queue(maxsize=storage_cfg.get('queue_maxsize', 200_000))
-        self.writer = HotParquetWriter(
-            self.queue,
-            base_dir=storage_cfg.get('hot_dir', 'data/hot'),
-            roll_interval_s=storage_cfg.get('roll_interval_seconds', 60),
-            max_rows=storage_cfg.get('max_rows_per_file', 500_000),
-            compression=storage_cfg.get('compression', 'lz4'),
-        )
-        self.dropped_rows = 0
-        self._last_drop_log = 0.0
-
-        # Every resync re-requests the full book in case updates were missed
-        self.snapshot_interval_s = storage_cfg.get('snapshot_interval_seconds', 300)
-        # Incremented per websocket data message; orders book rows for replay
-        self.seq = 0
-
-        # (symbol, stream) → (kind, start_ts, detail) for each open gap
-        self.gaps: Dict[Tuple[str, str], Tuple[str, Optional[int], Optional[str]]] = {}
-        for symbol in markets:
-            for stream in (BOOK, TRADE):
-                self._open_gap(symbol, stream, 'start', None)
 
         # Per connection (reset by _session)
         self._last_frame_ns = 0
@@ -123,7 +86,6 @@ class TidePoolCollector:
         self._requests: Dict[int, Tuple[str, str]] = {}   # req_id → (method, channel)
         self._next_req_id = 0
         self._next_resync = 0.0
-        self._needs_resync: set[str] = set()
 
     # -- the connection loop ------------------------------------------------------
 
@@ -144,10 +106,7 @@ class TidePoolCollector:
                                  f"retrying in {self.retry_s}s")
                     await asyncio.sleep(self.retry_s)
         finally:
-            for (symbol, stream), (kind, start_ts, detail) in list(self.gaps.items()):
-                self._write_gap(symbol, stream, kind, start_ts, None, detail)
-            self.gaps.clear()
-            await self.writer.stop()
+            await self._finish()
 
     def _connect_failed(self, exc: Exception) -> None:
         logger.warning(f"Connect to {self.url} failed, websockets will retry: {type(exc).__name__}: {exc}")
@@ -380,30 +339,6 @@ class TidePoolCollector:
                 for price in sorted(levels, reverse=reverse)[BOOK_DEPTH:]:
                     del levels[price]
 
-    def _enqueue(self, stream: str, row: dict) -> bool:
-        """
-        Hand a row to the Parquet writer without blocking the websocket loop.
-        If the queue is full (writer can't keep up), drop the row and open a gap.
-        A book that lost a row is resynced, so the stored book is correct again.
-        """
-        row['run_id'] = self.run_id
-        try:
-            self.queue.put_nowait((stream, row))
-            return True
-        except asyncio.QueueFull:
-            self.dropped_rows += 1
-            now = time.monotonic()
-            if now - self._last_drop_log >= 10:
-                logger.warning(f"Write queue full, dropped {self.dropped_rows} rows so far")
-                self._last_drop_log = now
-            symbol = row['symbol']
-            if stream == 'trade':
-                self._open_gap(symbol, TRADE, 'dropped_rows', row['recv_ts'])
-            else:
-                self._open_gap(symbol, BOOK, 'dropped_rows', row['recv_ts'])
-                self._needs_resync.add(symbol)
-            return False
-
     def _exchange_ts(self, item: dict, recv_ts: int) -> int:
         """
         Kraken's timestamp for this item in ns. Kraken sends one on every book and trade
@@ -463,27 +398,3 @@ class TidePoolCollector:
         })
         if stored:
             self._close_gap(symbol, TRADE, recv_ts)
-
-    # -- gaps ---------------------------------------------------------------------
-
-    def _open_gap(self, symbol: str, stream: str, kind: str, start_ts: Optional[int],
-                  detail: Optional[str] = None) -> None:
-        """Open a gap unless one is open already: the earliest start wins."""
-        self.gaps.setdefault((symbol, stream), (kind, start_ts, detail))
-
-    def _close_gap(self, symbol: str, stream: str, end_ts: int) -> None:
-        gap = self.gaps.pop((symbol, stream), None)
-        if gap is not None:
-            kind, start_ts, detail = gap
-            self._write_gap(symbol, stream, kind, start_ts, end_ts, detail)
-
-    def _write_gap(self, symbol: str, stream: str, kind: str, start_ts: Optional[int],
-                   end_ts: Optional[int], detail: Optional[str]) -> None:
-        # Straight to the writer: a gap row must not be lost to a full queue
-        self.writer.append('gap', {'ts': time.time_ns(), 'run_id': self.run_id, 'symbol': symbol,
-                                   'stream': stream, 'kind': kind, 'start_ts': start_ts,
-                                   'end_ts': end_ts, 'detail': detail})
-        span = f"{(end_ts - start_ts) / 1e9:.3f}s" if start_ts and end_ts else "start unknown or open at shutdown"
-        # A resync gap is routine (every snapshot_interval_seconds), so it logs at debug
-        level = logging.INFO if kind in ('disconnect', 'dropped_rows') else logging.DEBUG
-        logger.log(level, f"Gap {kind} {symbol} {stream}: {span}")
