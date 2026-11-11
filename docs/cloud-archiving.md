@@ -57,6 +57,8 @@ Settings users can change:
 * Delay: configurable; value still to be decided
 * Local retention policy: wait one day after verification before deleting the local copy
 * After retry limit: mark the file as failed in SQLite, log the error, and skip it in future scans
-* How to handle discrepancy between local and cloud copy: decide which copy is the source of truth
-  * Local is the source of truth: possible transmission error
-  * Cloud is the source of truth: possible local tampering
+* How to handle discrepancy between local and cloud copy during upload verification:
+  * Save the original checksum in SQLite when writing finishes; keep it unchanged
+  * If the local file matches its original checksum, retry the upload and verify again
+  * If retries run out, keep the local file, mark failed, log the error, and move on
+  * If the local checksum changed or the original checksum is missing, stop and flag for review
