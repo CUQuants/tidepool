@@ -26,6 +26,7 @@ Settings users can change:
 * Delay before uploading
 * Frequency to check
 * Keeping local copy after uploading
+* Delay before local deletion (one day after verification)
 * How many times to retry upload
 
 ## Reliability
@@ -50,10 +51,12 @@ Settings users can change:
 * Failed uploads get retried
 * Failed uploads don't delete locally
 
-## Decisions that need to be made
+## Decisions and open questions
 
-* Cloud Provider
-* Delay
-* Local retention policy
-* What happends after retry limit is met
-* How to handle discrepancy between local and cloud copy
+* Cloud Provider: stub out the provider integration for now
+* Delay: configurable; value still to be decided
+* Local retention policy: wait one day after verification before deleting the local copy
+* After retry limit: mark the file as failed in SQLite, log the error, and skip it in future scans
+* How to handle discrepancy between local and cloud copy: decide which copy is the source of truth
+  * Local is the source of truth: possible transmission error
+  * Cloud is the source of truth: possible local tampering
