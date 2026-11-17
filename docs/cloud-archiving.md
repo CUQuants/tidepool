@@ -53,12 +53,18 @@ Settings users can change:
 
 ## Decisions and open questions
 
-* Cloud Provider: stub out the provider integration for now
-* Delay: configurable; value still to be decided
-* Local retention policy: wait one day after verification before deleting the local copy
+* Cloud Provider: stub out `save_to_cloud` and the cloud file lookup; stubs cannot confirm uploads or allow deletion
+* Scope: all completed Parquet files from Kraken and OKX, including gap and status files
+* Delay: configurable; default to 24 hours after the file finishes writing
+* Scan interval: configurable; default to every 5 minutes
+* Retry limit: configurable; default to 3 total upload attempts, with 60 seconds between attempts
+* Local retention policy: deletion enabled by default, one day after verification; both settings are configurable
+* Run as a separate Python command; include a command to manually retry a failed file
 * After retry limit: mark the file as failed in SQLite, log the error, and skip it in future scans
 * How to handle discrepancy between local and cloud copy during upload verification:
   * Save the original checksum in SQLite when writing finishes; keep it unchanged
   * If the local file matches its original checksum, retry the upload and verify again
   * If retries run out, keep the local file, mark failed, log the error, and move on
   * If the local checksum changed or the original checksum is missing, stop and flag for review
+
+Implementation steps: [Cloud archiving plan](cloud-archiving-plan.md)
