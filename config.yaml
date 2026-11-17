@@ -42,6 +42,19 @@ storage:
   queue_maxsize: 200000          # rows buffered between websocket and writer before dropping
   snapshot_interval_seconds: 300 # resubscribe for a fresh book snapshot every N seconds (0 disables)
 
+# Archiving configuration (the sweeper and cloud integration are not implemented yet)
+archiving:
+  upload_delay_seconds: 86400    # 24 hours after file completion
+  scan_interval_seconds: 300
+  max_upload_attempts: 3         # total attempts, including the first
+  retry_delay_seconds: 60
+  delete_local: true             # only after verified upload and retention delay
+  deletion_delay_seconds: 86400  # 24 hours after first successful verification
+  state_file: data/archive_state.sqlite
+  scan_root: data/hot            # includes Kraken and the okx subdirectory
+  cloud_provider: stub
+  cloud_prefix: tidepool
+
 # Kraken WebSocket configuration (optional)
 kraken:
   ws_url: wss://ws.kraken.com/v2  # public market data; no credentials needed

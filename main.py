@@ -11,6 +11,7 @@ import sys
 import yaml
 from pathlib import Path
 from typing import Optional, Dict, Any
+from src.archiving_config import validate_archiving_config
 from src.collector import KrakenCollector
 from src.collector_base import TidePoolCollector
 
@@ -31,6 +32,9 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     try:
         with open(config_file, 'r') as f:
             config = yaml.safe_load(f)
+        if not isinstance(config, dict):
+            raise ValueError('Configuration must be a YAML mapping')
+        config['archiving'] = validate_archiving_config(config.get('archiving', {}))
         logger.info(f"Loaded configuration from {config_path}")
         return config
     except yaml.YAMLError as e:
@@ -62,6 +66,7 @@ def create_default_config(config_path: str):
             'queue_maxsize': 200000,
             'snapshot_interval_seconds': 300
         },
+        'archiving': validate_archiving_config({}),
         'kraken': {
             'ws_url': 'wss://ws.kraken.com/v2',
             'reconnect_interval': 30,

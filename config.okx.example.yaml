@@ -13,6 +13,18 @@ storage:
   compression: lz4
   queue_maxsize: 200000
   snapshot_interval_seconds: 300 # 0 disables periodic checkpoints
+# Share these paths with the Kraken collector; relative paths use the working directory.
+archiving:
+  upload_delay_seconds: 86400    # 24 hours after file completion
+  scan_interval_seconds: 300
+  max_upload_attempts: 3         # total attempts, including the first
+  retry_delay_seconds: 60
+  delete_local: true             # only after verified upload and retention delay
+  deletion_delay_seconds: 86400  # 24 hours after first successful verification
+  state_file: data/archive_state.sqlite
+  scan_root: data/hot            # scan both exchanges, not just data/hot/okx
+  cloud_provider: stub
+  cloud_prefix: tidepool
 okx:
   reconnect_interval: 5
   snapshot_timeout: 30
